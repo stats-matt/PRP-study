@@ -1,0 +1,737 @@
+---
+title: "PRP Summary"
+format:
+  docx:
+    toc: true
+    section-numbers: true
+    highlight-style: github
+execute:
+  echo: false
+  warning: false
+---
+
+```{r}
+#| include: false
+#| 
+
+  # pdf:
+  #   toc: true
+  #   number-sections: true
+  #   colorlinks: true
+
+  # html:
+  #   toc: true
+  #   toc-location: left
+library(dplyr)
+library(ggplot2)
+library(skimr)
+library(pander)
+library(stargazer)
+library(broom)
+library(lme4)
+library(lmerTest)
+library(readr)
+library(ggExtra)
+library(kableExtra)
+library(emmeans)
+library(optimx)
+library(glmmTMB)
+library(RCurl)
+library(details)
+library(rstatix)
+library(nnet)
+
+options(scipen=999)
+
+TPLO <- read_csv("TPLO.csv")
+TPLO <-
+  TPLO %>%
+  mutate(
+    GenderMF =
+      case_when(
+        Gender == "FI" ~ "F",
+        Gender == "FS" ~ "F",
+        Gender == "MI" ~ "M",
+        Gender == "MN" ~ "M"
+      ),
+    Incinfection.num = case_when(Incinfection == "Y" ~ 1,
+                                 Incinfection == "N" ~ 0),
+  )
+TPLO <- TPLO %>% mutate_if(is.character, as.factor)
+
+TPLO <- TPLO[-111,]
+
+TPLO_no_antibiotic <- TPLO %>%
+  filter(Antibiotic == "N")
+
+TPLO$Patientnumber <- as.factor(TPLO$Patientnumber)
+
+
+# add improvement variables ----
+TPLO <-
+  TPLO %>%
+  mutate(
+    GWorse = case_when(PostG > PreG ~ 1,
+                       PostG == PreG ~ 0,
+                       PostG < PreG ~ 0),
+    Gdiff = PostG - PreG,
+    OAWorse = case_when(PostOA > PreOA ~ 1,
+                        PostOA == PreOA ~ 0,
+                        PostOA < PreOA ~ 0),
+    OAdiff = PostOA - PreOA,
+    MWorse = case_when(PostM > PreM ~ 1,
+                       PostM == PreM ~ 0,
+                       PostM < PreM ~ 0),
+    Mdiff = PostM - PreM,
+    OSWorse = case_when(PostOs > PreOS ~ 1,
+                        PostOs == PreOS ~ 0,
+                        PostOs < PreOS ~ 0),
+    OSdiff = PostOs - PreOS,
+    EffChange = case_when(PostE > PreE ~ "Worse",
+                          PostE == PreE ~ "Same",
+                          PostE < PreE ~ "Better"),
+    Ediff = PostE - PreE
+  )
+
+TPLO <- TPLO %>% 
+  mutate(EffChange = as.factor(EffChange))
+
+```
+
+This is another summary document for the PRP analysis. For more details of the analysis, see final_models.R.
+
+## Goals
+
+The primary goal of this analysis is to understand differences in outcomes between dogs with PRP and dogs without PRP. Additional factors which could influence whether PRP is beneficial are included for each outcome measure when they are relevant.
+
+## Differences in population between dogs with PRP and dogs without PRP
+
+In general, the populations of the dogs with PRP and those without PRP are similar. There are no differences in these populations with regard to gender (p=0.17, Chi-squared test), age (p=0.59, t-test), presence of meniscal tear (p=0.39, Chi-squared test), weight (p=0.06, t-test), or BCS (p=0.67, Fisher exact test).
+
+## Modeling change in global OA score
+
+We consider changes in global OA score initially. We fist classify each dog as getting worse (1) or not getting worse (0). If the global OA score became larger after the surgery, the dog was considered to have gotten worse. If the score stayed the same, it was considered to have not gotten worse. If the post-surgery score was less than the pre-surgury, the dog was considered to have not gotten worse (since this is likely a case that was borderline). Dogs who were missing either measure were not included.
+
+In all analyses except for effusion, this same method of determining whether a dog was worse or not was used.
+
+### Worse or not
+
+We begin with a table of the number of dogs who got worse in their global OA score (GWorse) divided by those with PRP (Y) and those without (N).
+
+```{r}
+TPLO %>%
+  xtabs(data = ., ~ GWorse + PRP) %>% 
+  ftable()
+```
+
+The number of dogs who got worse without PRP (4) was twice that of those who did have PRP (2), though these counts are quite small.
+
+### Degree of change
+
+We also look at the degree of change in the following table:
+
+```{r}
+TPLO %>% 
+  xtabs(data=., ~ Gdiff + PRP) %>% 
+  ftable()
+```
+
+This means of the dogs without PRP, none improved, 40 stayed the same, 3 got worse by one level on the rating scale, and 1 got worse by 2 on the rating scale. Of the dogs with PRP, 2 improved (in the sense that their Global OA score was smaller post than it was pre), 43 stayed the same, 2 got worse by 1 on the scale, and none got worse by 2 on the scale.
+
+
+The type of model we will use is a generalized mixed model for the got worse/ didn't get worse distinction, and a linear mixed model for the degree of change. These models accounts for the fact that some dogs are represented multiple times in the dataset (so the measurements are not independent), and for the got worse / didn't get worse distinction allows us to predict the probability that a dog with/without PRP (and any additional relevant features) will have gotten worse in their global OA score.
+
+In global OA scores, none of the predictors are statistically significant for got worse/didn't get worse, though PRP is quite close (p = 0.072).
+
+In the below graph, you can see the predicted probability of globally getting worse with or without PRP, the probability of getting worse with PRP is less than with no PRP, but the probabilities are both quite low.
+
+```{r}
+#| include: false
+gworse_model <-
+  TPLO %>%
+  glmer(GWorse ~
+          #GenderMF +
+          #Age +
+          #Weight +
+          #Meniscus +
+          PRP +
+          #BCS +
+          (1 | Patientnumber),
+        data = .,
+        family = "binomial")
+
+gfinal <- allFit(gworse_model)[2][[1]]
+
+```
+
+```{r}
+emmip(gfinal, ~ PRP, type="response")
+```
+
+
+```{r}
+#| include: false
+gdiff_model <- 
+  TPLO %>% 
+  lmer(Gdiff ~ 
+         #GenderMF +
+          #Age +
+          #Weight +
+          #Meniscus +
+          PRP +
+          #BCS +
+          (1 | Patientnumber),
+       data=.)
+summary(gdiff_model)
+```
+For the degree of change in Global OA (e.g. the change from pre to post), PRP is a significant predictor (p=0.033). No other factors were significant. The average change for dogs without PRP was getting worse by 0.1235, while the average for dogs with PRP was actually a *decrease* by -0.0303. This is a little strange since the OA scores shouldn't generally decrease, but a few scores did decrease, and most of them stayed the same. The following table might illustrate:
+
+```{r}
+TPLO %>%
+  xtabs(data=., ~PreG+PostG+PRP) %>% 
+  ftable()
+```
+This table indicates that for the dogs with no PRP, none went from a 1 to a 0, 29 went from a 1 to a 1, 2 went from a 1 to a 2, and 1 went from a 1 to a 3. Starting at a 2, 11 went to a 2 and 1 went to a 3. For dogs with PRP who started at a 1, 1 went to a 0, 33 stayed at a 1, 2 went to a 2, and none went to a 3. For the dogs with PRP who started at a 2, none went to a 0, 1 went to a 1, 10 stayed at a 2, and none went to a 3. (Note: for the last model, if a dog "improved," they were said to have stayed the same. If this seems weird to report that dogs scores decreased, likely because they were borderline, we could recode them to have stayed the same, or we could exclude them since we don't know what exactly was going on, or keep the analysis like it is. Right now, a negative change just indicates a very borderline call, or possibly improvement if that is possible.)
+
+```{r}
+#| include: false
+emmeans(gdiff_model, ~ PRP)
+```
+
+A plot showing the average change in outcomes of Global OA for dogs with and without PRP is shown below.
+
+```{r}
+emmip(gdiff_model, ~ PRP)
+```
+
+
+## Modeling change in OS
+
+### Worse or not
+
+First we look at a table of changes in OS:
+
+```{r}
+TPLO %>%
+  xtabs(data = ., ~ OSWorse + PRP) %>% 
+  ftable()
+```
+
+A total of 10 dogs got worse in OS score - 6 among those with no PRP and 4 among those with PRP.
+
+```{r}
+#| include: false
+OSworse_model <-
+  TPLO %>%
+  glmer(OSWorse ~
+          #GenderMF +
+          #Age +
+          #Weight +
+          Meniscus +
+          #PRP +
+          #BCS +
+          (1 | Patientnumber),
+        data = .,
+        family = "binomial")
+
+summary(OSworse_model)
+```
+
+While PRP is not a significant predictor of whether OS scores changed (p=0.892), the presence of a meniscal tear is (p=0.024).
+
+
+```{r}
+#| include: false
+emmeans(OSworse_model, ~ Meniscus, type="response")
+```
+
+The probabilities for OS getting worse based on the state of meniscal tear is in the following plot.
+
+```{r}
+emmip(OSworse_model, ~ Meniscus, type="response")
+```
+
+### Degree of change
+
+```{r}
+#| include: false
+OSdiff_model <-
+  TPLO %>%
+  lmer(OSdiff ~
+          #GenderMF +
+          #Age +
+          #Weight +
+          Meniscus +
+          PRP +
+          #BCS +
+          (1 | Patientnumber),
+        data = .)
+
+summary(OSdiff_model)
+```
+
+Considering the degree of OS, we again find that PRP is not a significant predictor (p=0.277), but meniscal tear is (p=0.011). Having a torn meniscus decreases OS scores on average by 0.242, on average.
+
+```{r}
+emmip(OSdiff_model, ~ Meniscus)
+```
+
+## Modeling change in OA
+
+### Worse or not
+
+Modeling whether dogs got worse in OA, we consider the table:
+
+```{r}
+#| echo: false
+TPLO %>%
+  xtabs(data = ., ~ OAWorse + PRP) %>% 
+  ftable()
+```
+Again, relatively few dogs got worse. We model the probability of OA getting worse, and find that PRP is not a significant predictor, but the Meniscus status is. We see in the below graph that the probability of getting worse with PRP is less than with no PRP, and that the intact meniscus has a much higher probability of getting worse, but this is primarily because the probability of getting worse is very low among the dogs with a torn meniscus.
+
+```{r}
+#| include: false
+OAworse_model <-
+  TPLO %>%
+  glmer(OAWorse ~
+          #GenderMF +
+          #Age +
+          #Weight +
+          Meniscus +
+          PRP +
+          #BCS +
+          (1 | Patientnumber),
+        data = .,
+        family = "binomial")
+
+all <- allFit(OAworse_model)
+OAfinal <- all[1][[1]]
+summary(OAfinal)
+emmeans(OAfinal, ~ Meniscus, type="response")
+```
+
+The model indicates that PRP is not a sifgnifcant predictor (p=0.945) but Meniscal tear is (p=0.224). The probabilities based on meniscal tear are shown below.
+
+```{r}
+#| echo: false
+emmip(OAfinal, ~ Meniscus, type = "response")
+```
+
+### Degree of change
+
+```{r}
+#| include: false
+OAdiff_model <-
+  TPLO %>%
+  lmer(OAWorse ~
+          #GenderMF +
+          #Age +
+          #Weight +
+          Meniscus +
+          #PRP +
+          #BCS +
+          (1 | Patientnumber),
+        data = .)
+
+summary(OAdiff_model)
+emmeans(OAdiff_model, ~ Meniscus, type="response")
+```
+The story is similar when using degree of change. Only meniscus is significant (p=0.024), seen below. The estimated change in OA among dogs with intact meniscus is 0.1863 and among those with torn meniscus is 0.0218.
+
+```{r}
+emmip(OAdiff_model, ~ Meniscus)
+```
+
+
+## Modeling change in Mineralization
+
+### Worse or not
+
+Using the same measure of getting worse in mineralization, we see in the table below:
+
+```{r}
+#| echo: false
+TPLO %>%
+  xtabs(data = ., ~ MWorse + PRP) %>% 
+  ftable()
+```
+
+relatively few dogs got worse, regardless of PRP status.
+
+```{r}
+#| include: false
+MWorse_model <-
+  TPLO %>%
+  glmer(MWorse ~
+          #GenderMF +
+          #Age +
+          #Weight +
+          #Meniscus +
+          PRP +
+          #BCS +
+          (1 | Patientnumber),
+        data = .,
+        family = "binomial")
+
+summary(MWorse_model)
+```
+
+PRP is not a signifcant predictor of whether the dogs mineralization scores got worse (p=0.659).
+
+```{r}
+emmip(MWorse_model, ~ PRP, type = "response")
+```
+
+While not statistically significant, we do see that the probability of mineralization getting worse is less for dogs with PRP than those without.
+
+### Degree of change
+
+```{r}
+#| include: false
+Mdiff_model <-
+  TPLO %>%
+  lmer(Mdiff ~
+          #GenderMF +
+          #Age +
+          #Weight +
+          #Meniscus +
+          PRP +
+          #BCS +
+          (1 | Patientnumber),
+        data = .)
+
+summary(Mdiff_model)
+
+
+```
+In the model predicting degree of change of mineralization, none of the predictors were significant. (The p-value for PRP was 0.180).
+
+## Hospitalization
+
+This is a pretty curious one. If we look at a table of counts:
+
+```{r}
+#| echo: false
+TPLO %>%
+  xtabs(data = ., ~ Hosp + PRP) %>% 
+  ftable()
+```
+
+We see that for the dogs who did not recipeve PRP, they all stayed only one night. For the dogs who did get PRP, almost all stayed one night, 3 stayed 2 nights, and 1 stayed 3 nights. I'm a little hesitant to read too much into this since non of the non-PRP dogs stayed more than one night.
+
+```{r}
+#| include: false
+hosp_model <- 
+TPLO %>%
+  lmer(Hosp ~ 
+         GenderMF + 
+         Age + 
+         Weight + 
+         Meniscus + 
+         PRP +
+         BCS+
+     (1 | Patientnumber),
+       data = .)
+
+allFit(hosp_model)
+
+summary(hosp_model)
+
+emmeans(hosp_model, ~ PRP)
+```
+
+If we include only PRP as a predictor, it is not statistically significant in predicting length of stay. If we include other predictors, PRP is significant, but the other predictors are not. This leads me to think that it's an artifact of the small number of dogs that stayed more than one night. The graph below shows the expected numbers - the number of days for dogs with and without PRP is very close to 1 in both cases. That said, the model which includes all predictors leads to a p-value of 0.037.
+
+```{r}
+#| echo: false
+emmip(hosp_model, ~ PRP, type = "response")
+```
+
+## Changes in Effusion Scores
+
+Because effusion scores could become higher or lower, this variable has three levels: better, same, or worse. The table of counts is below.
+
+```{r}
+#| echo: false
+TPLO %>%
+  xtabs(data = ., ~ PRP + EffChange) %>% 
+  ftable()
+```
+
+If we investigate this relationship, we find that the difference is not statistically significant (Fisher exact test, p=0.225). Including additional predictors does not change the significance of PRP.
+
+```{r}
+#| include: false
+TPLO$EffChange <- relevel(TPLO$EffChange, ref = "Same")
+test <-
+  TPLO %>%
+  multinom(EffChange ~
+             GenderMF +
+             Age +
+             Weight +
+             Meniscus +
+             PRP +
+             BCS, data = .)
+summary(test)
+z <- summary(test)$coefficients / summary(test)$standard.errors
+z
+p <- (1 - pnorm(abs(z), 0, 1)) * 2
+p
+```
+
+
+
+```{r}
+#| include: false
+cm <- TPLO %>%
+  xtabs(data = ., ~ EffChange + PRP) %>%
+  chisq_test()
+cm$expected
+```
+
+```{r}
+#| include: false
+TPLO %>%
+  xtabs(data = ., ~ EffChange + PRP) %>%
+  fisher_test()
+```
+
+We can look at this a little more in a table:
+
+```{r}
+#| echo: false
+TPLO %>%
+  xtabs(data = ., ~ EffChange + PRP) %>% 
+  prop.table(2) %>% 
+  addmargins() %>% 
+  ftable()
+```
+
+Broken down by PRP, dogs without PRP mostly stayed the same, as was the case for dogs with PRP. For the dogs with PRP, the vast majority (80%) stayed the same, with nearly equal numbers getting better and getting worse. For dogs without PRP, a smaller percentage (66%) stayed the same, with 23% getting better and 11% getting worse. This may be suggestive that PRP leads to less variation in Effusion changes.
+
+
+## Infection
+
+For measuring infection, we only consider dogs without antibiotics. We first look at infection at follow-up (incinfection).
+
+```{r}
+#| include: false
+TPLO_no_antibiotic %>% 
+  select(Incinfection) %>% 
+  summary()
+```
+There are 67 cases of no infection, and 11 cases of infection. (Counting dogs with multiple surgeries once for each surgery.) Of these, the dogs break down by PRP statsus as follows:
+
+```{r}
+TPLO_no_antibiotic %>% 
+  xtabs(data=., ~ Incinfection + PRP) %>% 
+  ftable()
+```
+
+The numbers look fairly similar. A chi square test does not indicate a relationship between the presence of an incision infection and PRP.
+
+```{r}
+#| include: false
+chisq.test(table(TPLO_no_antibiotic$PRP, TPLO_no_antibiotic$Incinfection))
+
+TPLO_no_antibiotic %>% 
+  tabyl(PRP, Incinfection) %>% 
+  select(-1) %>% 
+  prop_test(alternative = "greater")
+prop_test(table(TPLO_no_antibiotic$PRP, TPLO_no_antibiotic$Incinfection))
+
+```
+
+We next consider the significant predictors of incision infection. While PRP is not significant, Age is (p=0.036) when controlling for the other dog characteristics. Notably, nocita is also not a significant predictor of infection. For Age, the odds ratio is 0.714, indicating that the odds of an incision infection decrease by 28.58% every year for a dog. 
+
+```{r}
+#| include: false
+TPLO_no_antibiotic %>%
+  glmer(
+    Incinfection.num ~ 
+      PRP + 
+      Age + 
+      Weight + 
+      Meniscus + 
+      Nocita +
+      BCS +
+      (1 | Patientnumber),
+    data = .,
+    family = binomial
+  ) %>%
+  summary()
+```
+
+## Intra-op complications
+
+We next consider intra-op complications. This includes all dogs (including those with antibiotics.)
+
+First we look at the counts:
+
+```{r}
+TPLO %>% 
+  xtabs(data=., ~ Icomp + PRP) %>% 
+  ftable()
+```
+There were more complications among the dogs with PRP than without PRP, though this difference is not significant (p=0.305). No other factors are significant predictors of incision complications (including nocita).
+
+```{r}
+#| include: false
+TPLO %>% 
+  xtabs(data=., ~ Icomp + PRP) %>% 
+  chisq_test()
+```
+
+```{r}
+#| include: false
+icomp_model <- 
+TPLO %>% 
+  glmer(
+    Icomp ~ 
+      PRP + 
+      #Age + 
+      #Weight + 
+      #Meniscus + 
+      #Nocita +
+      #BCS +
+      (1 | Patientnumber),
+    data = .,
+    family = binomial
+  )
+
+all <- allFit(icomp_model)
+summary(all[3][[1]])
+```
+
+## Incision complications at recheck (comprecheck)
+
+Only age is a significant predictor of complications at recheck (p=0.010). The odds ratio is 0.735, indicating a 26.54% reduction in the odds of infection for each year older the dog is.
+
+```{r}
+#| include: false
+comp_recheck_model <- 
+TPLO %>% 
+  glmer(
+    Comprecheck ~ 
+      PRP + 
+      Age + 
+      Weight + 
+      Meniscus + 
+      Nocita +
+      BCS +
+      (1 | Patientnumber),
+    data = .,
+    family = binomial
+  )
+
+summary(comp_recheck_model)
+```
+
+The graph below shows that this may be a result of the fact that no dog older than 6 had any complications on recheck.
+
+```{r}
+TPLO %>% 
+  select(Age, Comprecheck) %>% 
+  na.omit() %>% 
+  mutate(comprechecknum = as.numeric(Comprecheck)-1) %>% 
+ggplot(aes(x = Age, y = comprechecknum)) +
+  geom_jitter(height=0.1, width=0)+
+  stat_smooth(method="glm", se=FALSE, method.args = list(family=binomial))+
+  labs(x = "Age", y = "Probability of Complications on Recheck")
+```
+
+## Lameness score
+
+```{r}
+#| include: false
+lame_recheck_model <- 
+TPLO %>% 
+  lmer(
+    Lamerecheck ~ 
+      PRP + 
+      #Age + 
+      #Weight + 
+      #Meniscus + 
+      Nocita +
+      #BCS +
+      (1 | Patientnumber),
+    data = .
+  )
+
+summary(lame_recheck_model)
+```
+When predicting lameness at recheck, we find that both PRP and nocita are significant predictors (p=0.003 and p=0.025 respectively). Having PRP results in a decrease of lameness score by 0.412 on average, and having nocita reduces lameness scores by 0.289 on average. This can be seen in the following graph:
+
+```{r}
+#| include: false
+emmeans(lame_recheck_model, ~ PRP|Nocita)
+```
+
+
+```{r}
+emmip(lame_recheck_model, ~ PRP | Nocita)
+```
+Here the left graph indicates no nocita and the left graph indicates nocita. Within each graph, we see that the predicted lameness scores are (significantly) higher for the dogs with no PRP.
+
+## Osteotomy healing
+
+Here we investigate the healing of osteotomy (yes or no).
+
+```{r}
+TPLO %>% 
+  xtabs(data=., ~ Osteotomy + PRP)
+```
+
+
+
+```{r}
+#| include: false
+osteotomy_model <- 
+TPLO %>% 
+  glmer(
+    Osteotomy ~ 
+      PRP + 
+      Age + 
+      #Weight + 
+      #Meniscus + 
+      #Nocita +
+      #BCS +
+      (1 | Patientnumber),
+    data = .,
+    family = binomial
+  )
+
+all <- allFit(osteotomy_model)
+
+osteo_model_final <- all[1][[1]]
+summary(osteo_model_final)
+```
+We find that both PRP and age are significant predictors of osteotomy healing (p=0.003 and p=0.049, respectively.) For the average age dog (5.84 years), the probability of finding healing for dogs without PRP is 51.1% and for dogs with PRP is 87.6%.
+
+```{r}
+#| include: false
+emmeans(osteo_model_final, ~ Age | PRP, type="response")
+```
+
+The relationship between healing, age, and PRP can be seen in the following graph:
+
+```{r}
+TPLO %>%
+  select(Age, Osteotomy, PRP) %>%
+  na.omit() %>%
+  ggplot(aes(
+    x = Age,
+    y = as.numeric(Osteotomy) - 1,
+    color = PRP
+  )) +
+  geom_jitter(height = 0.1) +
+  stat_smooth(
+    method = "glm",
+    se = FALSE,
+    method.args = list(family = binomial)
+  ) +
+  labs(y = "Probability of Osteotomy Healing")
+```
+This indicates that as age increases, the probability of healing decreases, but for all ages, the probabilty of healing is higher for dogs with PRP than those without.
+

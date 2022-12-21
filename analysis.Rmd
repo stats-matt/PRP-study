@@ -1,0 +1,304 @@
+---
+title: "PRP Analysis"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+    code_folding: hide
+    number_sections: yes
+    toc_float: true
+  # html_notebook:
+  #   toc: yes
+  #   code_folding: hide
+  #   number_sections: yes
+---
+
+```{r load, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE, paged.print=TRUE)
+
+library(dplyr)
+library(ggplot2)
+library(skimr)
+library(pander)
+library(stargazer)
+library(broom)
+library(lme4)
+library(lmerTest)
+library(readr)
+library(ggExtra)
+library(kableExtra)
+#TPLO <- read.csv("TPLO.csv")
+TPLO <- read_csv("TPLO.csv")
+TPLO <- 
+  TPLO %>% 
+  mutate(GenderMF = 
+           case_when(
+             Gender == "FI" ~ "F",
+             Gender == "FS" ~ "F",
+             Gender == "MI" ~ "M",
+             Gender == "MN" ~ "M"
+           ),
+         Incinfection.num = case_when(Incinfection == "Y" ~ 1,
+                                      Incinfection == "N" ~ 0),
+         )
+TPLO <- TPLO %>% mutate_if(is.character, as.factor)
+
+TPLO <- TPLO[-111,]
+
+TPLO_no_antibiotic <- TPLO %>%
+  filter(Antibiotic == "N")
+```
+
+This is a brief summarized version of the analysis. For more detail, see final_models.R.
+
+# My short-version summary
+
+* The primary goal is to understand whether PRP affects a number of different outcomes
+* Possible control variables include:
+  * Gender
+  * Age
+  * Weight
+  * Nocita (for skin infection)
+  * Meniscal tear
+  * Related-pre in for post variables
+* Outcome variables:
+  * Hospitalization
+  * Bone healing
+  * All the Post options
+  * Incision
+  * Complication rates
+  * Infection rates - need to exclude dogs with antibiotics
+
+# Summarize data
+
+## Count by gender
+
+```{r}
+table(TPLO$PRP, TPLO$GenderMF)
+```
+
+## Counting number of unique dogs
+
+```{r results = "asis"}
+TPLO %>% 
+  count(Patientnumber) %>% 
+  count(n, name = "number of dogs")
+```
+So 68 dogs were measured once, and 21 dogs were measured twice. 
+
+That's enough that I'd be worried about ignoring it, so we'll keep Patient number as a variable to see whether it matters whether it's the same dog.
+
+## Similarity of group compositions, broken down by PRP and noPRP
+
+### Check for association between gender and PRP
+
+```{r}
+chisq.test(table(TPLO$PRP, TPLO$GenderMF)) %>% pander()
+```
+
+No significant difference between the treatments.
+
+## Summary Plots
+
+### Difference between outcome by PRP
+
+```{r}
+TPLO %>% 
+  ggplot(aes(x = PRP, y = PostG))+
+  geom_boxplot()+ 
+  geom_jitter(width = 0.25, height = 0.25)
+```
+
+### Relationship between pre and post
+
+```{r}
+TPLO %>%
+  ggplot(aes(x = PreG, y = PostG)) +
+  geom_jitter(height = 0.25, width = 0.25) +
+  geom_smooth(method = "lm", se = F)
+```
+
+### Including treatment
+
+```{r}
+TPLO %>%
+  ggplot(aes(x = PreG, y = PostG, color = PRP)) +
+  geom_jitter(height = 0.25, width = 0.25) +
+  geom_smooth(method = "lm", se = F)
+```
+
+### Summarize pre and post
+
+```{r}
+TPLO %>% 
+  select(PreG, PostG) %>% 
+  summary()
+```
+
+# Model Building
+
+## Hospitalization
+
+$\color{red}{\text{Note: Hosp says it's from 1 to 10, but only shows up as 1 to 3. Almost every dog only has one day for hospital stays, so it seems unlikely there will be much to explain here.}}$
+
+```{r}
+TPLO %>% count(Hosp)
+```
+
+```{r}
+TPLO %>% 
+  lmer(Hosp ~ GenderMF+Age+Weight+Meniscus+PRP+BCS + (1|Patientnumber), data=.) %>% 
+  summary()
+```
+Actually - PRP does seem to matter here. Dogs with PRP had a hospital stay 0.05 days less than dogs without. (Unsure whether this is practically meaningful.) Can simplify the model by removing the non-significant predictors, or could keep them all in for biological importance (or some subset).
+
+## Modeling Pre-posts
+
+### PostOA
+
+```{r}
+TPLO %>% 
+  xtabs(data=., ~ PostOA + PreOA)
+```
+
+
+
+```{r}
+plot1 <- TPLO %>% 
+  ggplot(aes(x = PreOA, y = PostOA, color=PRP))+
+  geom_jitter()+
+  geom_smooth(method="lm", se=F)
+ggMarginal(plot1)
+```
+
+That's a pretty clear (and unsurprising) pattern in pre to post - more OA before leads to more OA after. It doesn't look like there's much of a difference here in the relationship between PreOA and PostOA when comparing PRP and noPRP (without controlling for anything else).
+
+Can we predict PostOA using all the available information?
+
+```{r}
+TPLO %>% 
+  lmer(PostOA ~ GenderMF+Age+Weight+Meniscus+PRP+PreOA+BCS+(1|Patientnumber), data=.) %>% 
+  summary()
+```
+
+This looks like only weight and PreOA are significant predictors, but PRP is not.
+
+### PostG
+
+```{r}
+plot1 <- TPLO %>% 
+  ggplot(aes(x = PreG, y = PostG, color=PRP))+
+  geom_jitter()+
+  geom_smooth(method="lm", se=F)
+ggMarginal(plot1)
+```
+
+```{r}
+TPLO %>% 
+  lm(PostG ~ GenderMF+Age+Weight+Meniscus+PRP+PreG+BCS, data=.) %>% 
+  tidy() %>% 
+  pander()
+```
+
+Here, only PreG is a significant predictor.
+
+### PostE
+
+```{r}
+plot1 <- TPLO %>% 
+  ggplot(aes(x = PreE, y = PostE, color=PRP))+
+  geom_jitter()+
+  geom_smooth(method="lm", se=F)
+ggMarginal(plot1)
+```
+
+```{r}
+TPLO %>% 
+  lm(PostE ~ GenderMF+Age+Weight+Meniscus+PRP+PreE+BCS, data=.) %>% 
+  tidy() %>% 
+  pander()
+```
+
+### PostOS
+
+```{r}
+plot1 <- TPLO %>% 
+  ggplot(aes(x = PreOS, y = PostOs, color=PRP))+
+  geom_jitter()+
+  geom_smooth(method="lm", se=F)
+ggMarginal(plot1)
+```
+
+```{r}
+TPLO %>% 
+  lm(PostOs ~ GenderMF+Age+Weight+Meniscus+PRP+PreOS+BCS, data=.) %>% 
+  tidy() %>% 
+  pander()
+```
+
+Only PreOS is a significant predictor.
+
+### PostM
+```{r}
+plot1 <- TPLO %>% 
+  ggplot(aes(x = PreM, y = PostM, color=PRP))+
+  geom_jitter()+
+  geom_smooth(method="lm", se=F)
+ggMarginal(plot1)
+```
+
+```{r}
+TPLO %>% 
+  lm(PostM ~ GenderMF+Age+Weight+Meniscus+PRP+PreM+BCS, data=.) %>% 
+  tidy() %>% 
+  pander()
+```
+
+## Infection - only non-antibiotic dogs
+
+### Infection at follow-up, post-op infection rates
+
+```{r}
+TPLO_no_antibiotic %>% 
+  select(Incinfection) %>% 
+  summary()
+```
+
+```{r}
+TPLO_no_antibiotic %>%
+  ggplot(aes(x = PRP, y = Incinfection)) +
+  geom_jitter()
+```
+
+```{r}
+TPLO_no_antibiotic %>%
+  xtabs( ~ PRP + Incinfection, data = .) %>%
+  ftable()
+```
+
+I think the lack of significance here is just that there are so few dogs with Incinfection.
+
+```{r}
+chisq.test(table(TPLO_no_antibiotic$PRP, TPLO_no_antibiotic$Incinfection))
+```
+
+Predicting Incinfection using PRP, Age, Weight, and Meniscus can be done in two ways. The first is more straightforward (logistic regression, predicting the probability of infection given all those things), but ignores that some of the rows in the dataset come from the same dog. The second one takes into account the correlation of measurements from the same dog (but the results aren't terribly different, in fact the variation coming from the same dogs is so small, I don't see much reason to use the more complicated model).
+
+```{r}
+TPLO_no_antibiotic %>% 
+  glm(Incinfection.num~PRP+Age+Weight+Meniscus, data=., family = binomial) %>% 
+  tidy() %>% 
+  pander()
+```
+
+```{r}
+TPLO_no_antibiotic %>%
+  glmer(
+    Incinfection.num ~ PRP + Age + Weight + Meniscus + Nocita +
+      (1 | Patientnumber),
+    data = .,
+    family = binomial
+  ) %>%
+  summary()
+```
+
